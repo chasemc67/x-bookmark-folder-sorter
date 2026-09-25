@@ -48,7 +48,7 @@ export interface SorterSettings {
 
 export const sorterSettings: SorterSettings = {
   dryRun: true,
-  xUserId: '',
+  xUserId: '249951215',
 
   minConfidence: 0.7,
   checkMisfiled: true,
@@ -69,5 +69,5 @@ export const sorterSettings: SorterSettings = {
   excludedFolders: [],
 
   xConnectConnector: 'oauth/x-bookmarks',
-  xConnectSubjectId: 'chase',
+  xConnectSubjectId: 'chasemc67',
 };
