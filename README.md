@@ -141,7 +141,7 @@ An X detail to be aware of: X's OpenAPI spec says `folder_id` on `POST /2/users/
 1. Import this repo in Vercel. It uses the "Other" framework preset; `vercel.json` sets the build command, the `public/` output, `maxDuration: 300`, and the cron.
 2. Add the secrets for Production: `CRON_SECRET` and `AI_GATEWAY_API_KEY`. The OIDC token Connect uses is injected automatically; no X or KV env vars are needed.
 3. Create the Custom OAuth connector, attach it to the project, and run `npm run connect:x` once, as described in [X OAuth via Vercel Connect](#x-oauth-via-vercel-connect).
-4. Deploy. The cron in `vercel.json` runs daily at `0 14 * * *` (14:00 UTC). Crons only run on production deployments.
+4. Deploy. The cron in `vercel.json` runs once daily at midnight America/Los_Angeles, scheduled as `0 7 * * *` (07:00 UTC). Vercel cron schedules are UTC-only and do not adjust for daylight saving time: `0 7 * * *` is midnight during Pacific Daylight Time (UTC-7), but during Pacific Standard Time (UTC-8) it fires at 11pm PT instead of midnight unless the cron is changed to `0 8 * * *`. Crons only run on production deployments.
 
 **Upgrading from the Upstash/KV version:** before deploying, remove `X_CLIENT_ID`, `X_CLIENT_SECRET`, and any `X_REFRESH_TOKEN` from the project env, and disconnect the Upstash/KV integration from the project (it only held X tokens; runs fail while its `KV_*` vars are still set). Delete any leftover local `.x-tokens.json`.
 
