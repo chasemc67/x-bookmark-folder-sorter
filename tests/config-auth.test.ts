@@ -18,13 +18,12 @@ test('dry run is the default; only an explicit false enables live mode', () => {
   assert.equal(parseDryRun('0'), false);
 });
 
-test('Jev provider is inferred from available keys', () => {
-  assert.equal(loadConfig({ JEV_API_KEY: 'jv' }).jev.provider, 'jev');
-  assert.equal(loadConfig({ TYPESAFE_API_KEY: 'ts' }).jev.provider, 'typesafe');
-  assert.equal(loadConfig({ VERCEL_OIDC_TOKEN: 'oidc' }).jev.provider, 'gateway');
-  assert.equal(loadConfig({ JEV_PROVIDER: 'gateway', JEV_API_KEY: 'jv' }).jev.provider, 'gateway');
-  assert.throws(() => loadConfig({}), /JEV_API_KEY/);
-  const config = loadConfig({ JEV_API_KEY: 'jv' });
+test('Jev is Gateway-only: requires AI_GATEWAY_API_KEY and pins JEV_MODEL', () => {
+  assert.throws(() => loadConfig({}), /AI_GATEWAY_API_KEY/);
+  assert.throws(() => loadConfig({ JEV_API_KEY: 'jv' }), /AI_GATEWAY_API_KEY/);
+  assert.throws(() => loadConfig({ AI_GATEWAY_API_KEY: 'k', JEV_MODEL: 'jev-latest' }), /typesafe-ai\/jev/);
+  const config = loadConfig({ AI_GATEWAY_API_KEY: 'k', JEV_MODEL: 'typesafe-ai/jev' });
+  assert.deepEqual(config.jev, { apiKey: 'k', timeoutMs: 15_000, zeroDataRetention: false });
   assert.equal(config.dryRun, true);
   assert.equal(config.minConfidence, 0.7);
   assert.equal(config.refileMisfiled, false);

@@ -69,7 +69,7 @@ export function answer(choice: string, probabilities: Record<string, number>): C
 export function scriptedJev(pick: (tweetId: string, question: ChoiceQuestion) => ChoiceAnswer | undefined) {
   const calls: { state: JevInput; questions: Record<string, ChoiceQuestion> }[] = [];
   const client: JevClient = {
-    provider: 'jev',
+    model: 'typesafe-ai/jev',
     async decide(state, questions): Promise<DecideResult> {
       calls.push({ state, questions });
       const answers: Record<string, ChoiceAnswer> = {};

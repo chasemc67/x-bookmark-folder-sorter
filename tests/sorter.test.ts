@@ -81,7 +81,7 @@ test('misfiled bookmarks are refiled only when REFILE_MISFILED is enabled', asyn
 test('failed Jev batches and missing answers fail closed with no writes', async () => {
   const x = fakeXApi();
   const jev = {
-    provider: 'jev' as const,
+    model: 'typesafe-ai/jev',
     async decide(): Promise<never> {
       throw new Error('synthetic outage');
     },

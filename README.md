@@ -1,6 +1,6 @@
 # x-bookmark-folder-sorter
 
-Sorts your X (Twitter) bookmarks into your existing bookmark folders, once a day, on a Vercel cron. [Jev](skills/jev/SKILL.md) (TypeSafe's System One decision model) classifies each post with a typed `choice` question whose options are your folder names plus `keep_unfiled` and `skip`. Everything else is plain, deterministic code: listing, the confidence gate, idempotency, and the writes.
+Sorts your X (Twitter) bookmarks into your existing bookmark folders, once a day, on a Vercel cron. [Jev](skills/typesafe-ai/SKILL.md) (TypeSafe's System One decision model, called only through Vercel AI Gateway as `typesafe-ai/jev`) classifies each post with a typed `choice` question whose options are your folder names plus `keep_unfiled` and `skip`. Everything else is plain, deterministic code: listing, the confidence gate, idempotency, and the writes.
 
 **It never loses bookmarks.** Dry run is the default. Live mode only *adds* already-bookmarked posts into folders that already exist, using `POST /2/users/:id/bookmarks` with `folder_id`. The X client in this repo has no delete or unbookmark method at all.
 
@@ -8,7 +8,7 @@ Sorts your X (Twitter) bookmarks into your existing bookmark folders, once a day
 
 1. List your bookmark folders, each folder's post IDs, and your bookmarks (X returns at most the 800 most recent).
 2. Choose candidates: unfiled bookmarks first, then filed ones when `CHECK_MISFILED=true`, capped at `MAX_BOOKMARKS_PER_RUN`. Bookmarks in `EXCLUDED_FOLDERS` are left alone.
-3. Ask Jev in batches of `JEV_BATCH_SIZE`. Each batch sends one shared, trimmed state (author handle, post text up to `MAX_TEXT_CHARS`, current folder names, and the folder list) plus one `choice` question per bookmark. Criteria keys are the folder names, so they are what the model sees.
+3. Ask Jev in batches of `JEV_BATCH_SIZE`. Each batch sends one shared, trimmed state (author handle, post text up to `MAX_TEXT_CHARS`, current folder names, and the folder list) plus one `choice` question per bookmark. Criteria keys are the folder names, so they are what the model sees. Every question also offers `keep_unfiled` (no folder clearly fits, so leave it alone) and `skip` (the post can't be judged).
 4. Plan each bookmark with the pure planner in `src/sorter/plan.ts`:
 
 | Situation | Result |
@@ -36,17 +36,18 @@ npm run check          # typecheck + unit tests
 
 Direct dependencies are pinned to exact versions. The first `npm install` generates `package-lock.json`; commit it so Vercel installs the same dependency tree.
 
-### 1. Jev key
+### 1. Jev via Vercel AI Gateway
 
-Pick one backend. The provider is inferred from whichever key is set, or you can force it with `JEV_PROVIDER`.
+Jev is called **only** through Vercel AI Gateway, with the same wiring as Jevis: `gateway.evaluationModel('typesafe-ai/jev')` from `@ai-sdk/gateway` and `experimental_evaluate` from `ai`. The client pins the destination to `https://ai-gateway.vercel.sh/v4/ai/evaluation-model`, rejects redirects, routes with `providerOptions.gateway.only: ['typesafe-ai']`, retries once on 429 or 5xx with jitter inside a total `JEV_TIMEOUT_MS` deadline, and fails closed otherwise. It never calls the TypeSafe API or any third-party Jev proxy directly.
 
-| `JEV_PROVIDER` | Key | Endpoint |
-| --- | --- | --- |
-| `jev` (default when set) | `JEV_API_KEY` (`jv_live_...`, from [jevtypesafeai.com/pricing](https://jevtypesafeai.com/pricing)) | `https://jevtypesafeai.com/api/v1/decide` |
-| `typesafe` | `TYPESAFE_API_KEY` | `https://api.typesafe.ai/v1/systemone` (model `jev-latest`) |
-| `gateway` | `AI_GATEWAY_API_KEY`, or none on Vercel (uses the deployment's OIDC token) | Vercel AI Gateway `typesafe-ai/jev`, the same integration Jevis uses |
+- `AI_GATEWAY_API_KEY`: a server-only key from the [AI Gateway API keys page](https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys)
+- `JEV_MODEL`: defaults to `typesafe-ai/jev`. Any other value is rejected.
+
+A single flat Choice fits bookmark folders, since X folders have no hierarchy. If your folder list grows into a deep taxonomy, TypeSafe's [hierarchical classification cookbook](https://docs.typesafe.ai/cookbooks/hierarchical_classification.md) (beam search over nested Choice questions) is the pattern to move to.
 
 ### 2. X app and OAuth 2.0 user token
+
+The cron calls the X API directly with your own X developer app's OAuth 2.0 credentials, read from Vercel env. Agent-side X connectors (such as a chat bot's X integration) are not available inside the cron.
 
 1. In the [X Developer Console](https://developer.x.com), create an app with OAuth 2.0 enabled. Add the callback URL `http://127.0.0.1:8787/callback` (or set `X_REDIRECT_URI`).
 2. Scopes: `tweet.read users.read bookmark.read bookmark.write offline.access`. `offline.access` is what gets you a refresh token for unattended cron runs.
@@ -81,9 +82,9 @@ An X detail to be aware of: X's OpenAPI spec says `folder_id` on `POST /2/users/
 ## Deploy to Vercel
 
 1. Import this repo in Vercel. It uses the "Other" framework preset; `vercel.json` sets the build command, the `public/` output, `maxDuration: 300`, and the cron.
-2. Set environment variables for Production:
+2. Set environment variables for Production. All secrets live only in Vercel env, never in the repo:
    - `CRON_SECRET`: a random string of at least 16 characters, e.g. `openssl rand -hex 32`
-   - A Jev key: `JEV_API_KEY` (or `TYPESAFE_API_KEY`, or `JEV_PROVIDER=gateway`)
+   - `AI_GATEWAY_API_KEY`, plus optionally `JEV_MODEL=typesafe-ai/jev` (the default)
    - `X_CLIENT_ID`, `X_CLIENT_SECRET` (if confidential), `X_USER_ID`
    - `KV_REST_API_URL` and `KV_REST_API_TOKEN` (set automatically when you connect Upstash Redis)
    - `X_REFRESH_TOKEN`, only if you did not seed the store with `npm run auth:x`
@@ -114,13 +115,12 @@ Locally, `npm run dev` serves the same route at `http://127.0.0.1:3000/api/cron/
 | `MISFILED_MIN_CONFIDENCE` | `0.9` | Gate for misfile reports and refiles |
 | `MAX_BOOKMARKS_PER_RUN` | `200` | Cap on Jev classifications per run |
 | `MAX_WRITES_PER_RUN` | `50` | Cap on add-to-folder writes per run; the rest are deferred to the next run |
-| `JEV_PROVIDER` | inferred | `jev`, `typesafe`, or `gateway` |
-| `JEV_API_KEY` / `TYPESAFE_API_KEY` / `AI_GATEWAY_API_KEY` | | Jev credentials (see above) |
-| `JEV_MODEL`, `JEV_API_URL` | | Optional model and endpoint overrides |
+| `AI_GATEWAY_API_KEY` | required | Server-only Vercel AI Gateway key for Jev |
+| `JEV_MODEL` | `typesafe-ai/jev` | Must be `typesafe-ai/jev`; anything else is rejected |
 | `JEV_BATCH_SIZE` | `10` | Bookmarks per Jev request |
-| `JEV_TIMEOUT_MS` | `20000` | Per-request Jev timeout |
+| `JEV_TIMEOUT_MS` | `15000` | Total deadline per Jev batch, including the one retry |
 | `MAX_TEXT_CHARS` | `400` | Post text is trimmed to this length before it goes into the Jev state |
-| `GATEWAY_ZERO_DATA_RETENTION` | `false` | Gateway provider only |
+| `GATEWAY_ZERO_DATA_RETENTION` | `false` | Request zero data retention from AI Gateway |
 | `FOLDER_DESCRIPTIONS` | | JSON object of `{ "Folder name": "what belongs here" }` that sharpens criteria |
 | `EXCLUDED_FOLDERS` | | Comma-separated folder names that are never targets and never touched |
 | `X_USER_ID` | from `/2/users/me` | Your numeric X user ID |
@@ -136,18 +136,13 @@ Locally, `npm run dev` serves the same route at `http://127.0.0.1:3000/api/cron/
 api/cron/sort-bookmarks.ts  Vercel function (Web GET handler)
 src/handler.ts              cron auth + run + JSON summary
 src/sorter/                 questions (Jev state/choice), plan (pure policy), run (orchestration + add-only writes)
-src/jev/                    Jev clients: jevtypesafeai proxy, TypeSafe HTTP, AI Gateway (AI SDK)
+src/jev/                    Jev client: Vercel AI Gateway typesafe-ai/jev via the AI SDK (Gateway-only)
 src/x/                      X API client (read + add-to-folder only), OAuth2 refresh, token stores
 scripts/                    sort CLI, local dev server, OAuth2 PKCE helper
-skills/                     vendored Jev + TypeSafe agent skills
+skills/                     vendored TypeSafe agent skill (from Jevis)
 tests/                      node:test unit tests using small synthetic mocks
 ```
 
 ## Agent skills
 
-Read these before changing the Jev integration (prompts, question shapes, thresholds, providers):
-
-- [`skills/jev/SKILL.md`](skills/jev/SKILL.md): the Jev Decision API via jevtypesafeai.com
-- [`skills/typesafe-ai/SKILL.md`](skills/typesafe-ai/SKILL.md): the official TypeSafe skill ([MIT](skills/typesafe-ai/LICENSE)). The live docs at [docs.typesafe.ai](https://docs.typesafe.ai/llms.txt) are the source of truth.
-
-See [`skills/README.md`](skills/README.md) for how they relate to this repo.
+Read [`skills/typesafe-ai/SKILL.md`](skills/typesafe-ai/SKILL.md) before changing the Jev integration (prompts, question shapes, thresholds, Gateway wiring). It is the official [typesafe-ai/skills](https://github.com/typesafe-ai/skills) skill ([MIT](skills/typesafe-ai/LICENSE)), copied from Jevis. The live docs at [docs.typesafe.ai/llms.txt](https://docs.typesafe.ai/llms.txt) are the source of truth. See [`skills/README.md`](skills/README.md) for the Gateway-only rule.
