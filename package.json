@@ -1,0 +1,28 @@
+{
+  "name": "x-bookmark-folder-sorter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic X bookmark folder sorter via Jev + Vercel cron",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "dev": "tsx watch scripts/dev-server.ts",
+    "sort": "tsx scripts/sort.ts",
+    "auth:x": "tsx scripts/x-auth.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck",
+    "test": "tsx --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@ai-sdk/gateway": "4.0.87",
+    "ai": "7.0.107"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.4",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2"
+  }
+}
