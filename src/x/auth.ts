@@ -32,7 +32,13 @@ export class XAuthorizationRequiredError extends Error {
   override readonly name = 'XAuthorizationRequiredError';
 }
 
-function describeConnectError(error: unknown, { connector, subjectId }: XConnectTarget): Error {
+export function isAuthorizationRequired(error: unknown): boolean {
+  return error instanceof UserAuthorizationRequiredError
+    || error instanceof NoValidTokenError
+    || error instanceof XAuthorizationRequiredError;
+}
+
+export function describeConnectError(error: unknown, { connector, subjectId }: XConnectTarget): Error {
   if (error instanceof UserAuthorizationRequiredError || error instanceof NoValidTokenError) {
     return new XAuthorizationRequiredError(
       `X is not authorized for Connect subject "${subjectId}" on connector "${connector}" (${error.message}). `

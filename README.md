@@ -109,6 +109,17 @@ npm run connect:x
 
 `connect:x` asks Connect for a token. If the subject has no grant yet, it calls `startAuthorization` and prints the X consent URL. Open it, sign in as the X account the cron should sort, approve, and press Enter. It then prints your numeric X user id, which you can put in `xUserId` to skip the `/2/users/me` lookup each run. The grant belongs to the connector and subject, not to an environment, so authorizing locally also authorizes the production cron. Re-run `npm run connect:x` if you ever revoke the app on X.
 
+**Authorizing under production OIDC.** If the cron still gets `XAuthorizationRequiredError` even though the dashboard's "Test User Authorization" shows a grant for the subject, create the grant from the production deployment itself. `GET /api/connect/authorize-x` runs `getTokenResponse` and, when that fails, runs `startAuthorization` with the deployment's own OIDC token and the same subject and scopes the cron requests. It uses the same `Authorization: Bearer $CRON_SECRET` check as the cron route. There is deliberately no `?token=` parameter, so the secret never ends up in request logs or browser history. Because a browser can't send the header, take the redirect URL from curl:
+
+```bash
+curl -si -H "Authorization: Bearer $CRON_SECRET" https://x-bookmark-folder-sorter.vercel.app/api/connect/authorize-x
+```
+
+- `302` with a `Location` header (also returned as `authorizeUrl` in the JSON body): open that URL in a browser, sign in as @ChaseMc67, and approve. Then run the curl again.
+- `200 { "ok": true, "subject": ..., "xUserId": ... }`: production OIDC already gets a token for the subject, so the cron will too. The access token itself is never returned or logged.
+
+The route only reads the grant or starts authorizing it. It never touches bookmarks and ignores `dryRun`. It's safe to leave deployed, or you can delete `api/connect/authorize-x.ts` once the cron works.
+
 If a run finds no valid grant (Connect throws `UserAuthorizationRequiredError` or `NoValidTokenError`), it fails before touching X with `X is not authorized for Connect subject "MRaz5FqERysDw0algrlADHti" on connector "oauth/x-bookmarks" ... Run npm run connect:x`. The cron response is a `500` with that message and the log line is `run_failed` with `error: "XAuthorizationRequiredError"`.
 
 **Pricing.** Connect bills per token request (Hobby includes 500 a month; Pro is $3.00 per 1,000). The SDK caches the token in-process and the provider asks for one that stays valid for the whole run, so a daily cron costs about one token request per run.
@@ -162,8 +173,10 @@ Locally, `npm run dev` serves the same route at `http://127.0.0.1:3000/api/cron/
 ```
 config/sorter.ts            all tunables (checked in)
 api/cron/sort-bookmarks.ts  Vercel function (Web GET handler)
+api/connect/authorize-x.ts  one-shot Connect authorization under production OIDC (Bearer CRON_SECRET)
 src/config.ts               secrets from env + config validation + retired-env guard
 src/handler.ts              cron auth + run + JSON summary
+src/connectAuthorize.ts     authorize-x handler: token check, else startAuthorization + 302
 src/sorter/                 questions (Jev state/choice), plan (pure policy), run (orchestration + add-only writes)
 src/jev/                    Jev client: Vercel AI Gateway typesafe-ai/jev via the AI SDK (Gateway-only)
 src/x/                      X API client (read + add-to-folder only), Vercel Connect token provider
