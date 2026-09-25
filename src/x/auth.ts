@@ -1,95 +1,93 @@
+import {
+  ConnectError,
+  ConnectorInstallationRequiredError,
+  getTokenResponse,
+  NoValidTokenError,
+  UserAuthorizationRequiredError,
+  type ConnectTokenParams,
+} from '@vercel/connect';
 import type { Log } from '../log.js';
-import type { StoredXTokens, TokenStore } from './tokenStore.js';
 import type { AccessTokenProvider } from './types.js';
 
+/** Endpoints and scopes to configure on the Vercel Connect Custom OAuth connector. */
 export const X_AUTHORIZE_URL = 'https://x.com/i/oauth2/authorize';
 export const X_TOKEN_URL = 'https://api.x.com/2/oauth2/token';
-/** offline.access is what makes X issue a refresh token for unattended cron runs. */
+/** offline.access is what makes X issue the refresh token Connect uses for unattended cron runs. */
 export const X_SCOPES = ['tweet.read', 'users.read', 'bookmark.read', 'bookmark.write', 'offline.access'] as const;
 
-const REFRESH_SKEW_MS = 5 * 60 * 1000;
+/** A cached token must outlive the whole run (function maxDuration is 300s). */
+const VALIDITY_BUFFER_MS = 10 * 60 * 1000;
 
-export interface OAuthClientCredentials {
-  clientId: string;
-  /** Present for confidential ("Web App") clients; omit for public ("Native App") clients. */
-  clientSecret?: string;
+/** One Connect connector serves many X accounts; each account is one `user` subject. */
+export interface XConnectTarget {
+  connector: string;
+  subjectId: string;
 }
 
-interface TokenResponse {
-  access_token?: unknown;
-  refresh_token?: unknown;
-  expires_in?: unknown;
+export function xTokenParams(subjectId: string): ConnectTokenParams {
+  return { subject: { type: 'user', id: subjectId }, scopes: [...X_SCOPES] };
 }
 
-export async function requestToken(
-  params: Record<string, string>,
-  client: OAuthClientCredentials,
-  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
-  now: () => number = Date.now,
-): Promise<StoredXTokens> {
-  const body = new URLSearchParams(params);
-  const headers: Record<string, string> = { 'content-type': 'application/x-www-form-urlencoded' };
-  if (client.clientSecret) {
-    headers.authorization = `Basic ${Buffer.from(`${client.clientId}:${client.clientSecret}`).toString('base64')}`;
-  } else {
-    body.set('client_id', client.clientId);
-  }
-  const response = await fetchImpl(X_TOKEN_URL, { method: 'POST', headers, body, redirect: 'error' });
-  const json = (await response.json().catch(() => ({}))) as TokenResponse & { error?: unknown; error_description?: unknown };
-  if (!response.ok || typeof json.access_token !== 'string') {
-    // Error bodies from the token endpoint never echo secrets, but keep them short anyway.
-    const reason = typeof json.error_description === 'string' ? json.error_description : typeof json.error === 'string' ? json.error : 'unknown';
-    throw new Error(`X token request failed (HTTP ${response.status}): ${reason.slice(0, 200)}`);
-  }
-  if (typeof json.refresh_token !== 'string') {
-    throw new Error('X token response had no refresh_token; authorize with the offline.access scope');
-  }
-  const expiresIn = typeof json.expires_in === 'number' ? json.expires_in : 7200;
-  return { accessToken: json.access_token, refreshToken: json.refresh_token, expiresAt: now() + expiresIn * 1000 };
+export class XAuthorizationRequiredError extends Error {
+  override readonly name = 'XAuthorizationRequiredError';
 }
 
-export interface RefreshingTokenProviderOptions {
-  client: OAuthClientCredentials;
-  store: TokenStore;
+function describeConnectError(error: unknown, { connector, subjectId }: XConnectTarget): Error {
+  if (error instanceof UserAuthorizationRequiredError || error instanceof NoValidTokenError) {
+    return new XAuthorizationRequiredError(
+      `X is not authorized for Connect subject "${subjectId}" on connector "${connector}" (${error.message}). `
+      + 'Run `npm run connect:x` and approve access in the browser, then rerun.',
+    );
+  }
+  if (error instanceof ConnectorInstallationRequiredError) {
+    return new Error(`Vercel Connect connector "${connector}" needs to be installed or attached to this project: ${error.message}`);
+  }
+  if (error instanceof ConnectError) {
+    const code = error.code ?? (error.status === undefined ? 'error' : `HTTP ${error.status}`);
+    return new Error(
+      `Vercel Connect token request for "${connector}" failed (${code}): ${error.message}. `
+      + 'Check xConnectConnector in config/sorter.ts and that the connector is attached to this project.',
+    );
+  }
+  return new Error(
+    `Could not get an X token from Vercel Connect: ${(error as Error).message}. `
+    + 'Locally, run `vercel link` and `vercel env pull` so VERCEL_OIDC_TOKEN is in .env.local.',
+  );
+}
+
+export interface ConnectTokenProviderOptions extends XConnectTarget {
   log?: Log;
-  fetch?: typeof globalThis.fetch;
-  now?: () => number;
+  getTokenResponse?: typeof getTokenResponse;
 }
 
 /**
- * X rotates refresh tokens on every use, so each refreshed pair is persisted before
- * the new access token is handed out; otherwise the next cron run could not auth.
+ * Called before every X request. The Connect SDK caches the token in-process, so a run
+ * normally makes one billed token request; Connect holds and rotates the X refresh token.
  */
-export class RefreshingTokenProvider implements AccessTokenProvider {
-  private current?: StoredXTokens;
-  private inflight?: Promise<string>;
-  private readonly now: () => number;
+export class ConnectTokenProvider implements AccessTokenProvider {
+  private lastTokenId?: string;
 
-  constructor(private readonly options: RefreshingTokenProviderOptions) {
-    this.now = options.now ?? Date.now;
-  }
+  constructor(private readonly options: ConnectTokenProviderOptions) {}
 
   async getAccessToken(): Promise<string> {
-    this.inflight ??= this.resolve().finally(() => {
-      this.inflight = undefined;
-    });
-    return this.inflight;
-  }
-
-  private async resolve(): Promise<string> {
-    this.current ??= await this.options.store.load();
-    if (this.current && this.current.expiresAt - REFRESH_SKEW_MS > this.now()) return this.current.accessToken;
-    const refreshToken = this.current?.refreshToken;
-    if (!refreshToken) throw new Error('No X refresh token in the token store: run `npm run auth:x`');
-    const next = await requestToken(
-      { grant_type: 'refresh_token', refresh_token: refreshToken },
-      this.options.client,
-      this.options.fetch,
-      this.now,
-    );
-    await this.options.store.save(next);
-    this.current = next;
-    this.options.log?.('x_token_refreshed', { store: this.options.store.kind, expiresAt: new Date(next.expiresAt).toISOString() });
-    return next.accessToken;
+    const { connector, subjectId, log } = this.options;
+    const fetchToken = this.options.getTokenResponse ?? getTokenResponse;
+    let response;
+    try {
+      response = await fetchToken(connector, { ...xTokenParams(subjectId), validityBufferMs: VALIDITY_BUFFER_MS });
+    } catch (error) {
+      throw describeConnectError(error, this.options);
+    }
+    const tokenId = response.tokenId ?? String(response.expiresAt);
+    if (tokenId !== this.lastTokenId) {
+      this.lastTokenId = tokenId;
+      log?.('x_token_issued', {
+        connector: response.connector.uid,
+        subject: subjectId,
+        tokenId: response.tokenId,
+        expiresAt: new Date(response.expiresAt).toISOString(),
+      });
+    }
+    return response.token;
   }
 }
