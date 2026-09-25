@@ -3,7 +3,7 @@ import { handleSortRequest } from '../src/handler.js';
 import { loadLocalEnv } from './env.js';
 
 loadLocalEnv();
-const port = Number(process.env.PORT ?? 3000);
+const port = 3000;
 
 createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://localhost:${port}`);

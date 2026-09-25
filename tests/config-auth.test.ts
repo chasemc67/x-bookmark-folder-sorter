@@ -1,32 +1,40 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createTokenProvider } from '../src/app.js';
-import { loadConfig, parseDryRun } from '../src/config.js';
+import { sorterSettings } from '../config/sorter.js';
+import { loadConfig, RETIRED_ENV_VARS } from '../src/config.js';
 import { checkCronAuth } from '../src/cronAuth.js';
 import { handleSortRequest } from '../src/handler.js';
 import { silentLog } from '../src/log.js';
 import type { RunSummary } from '../src/sorter/run.js';
 import { RefreshingTokenProvider, X_TOKEN_URL } from '../src/x/auth.js';
-import { MemoryTokenStore } from '../src/x/tokenStore.js';
+import { MemoryTokenStore, UpstashTokenStore } from '../src/x/tokenStore.js';
 
-test('dry run is the default; only an explicit false enables live mode', () => {
-  assert.equal(parseDryRun(undefined), true);
-  assert.equal(parseDryRun(''), true);
-  assert.equal(parseDryRun('flase'), true);
-  assert.equal(parseDryRun('true'), true);
-  assert.equal(parseDryRun('false'), false);
-  assert.equal(parseDryRun('0'), false);
-});
+const secretsEnv = { AI_GATEWAY_API_KEY: 'k', X_CLIENT_ID: 'cid' };
 
-test('Jev is Gateway-only: requires AI_GATEWAY_API_KEY and pins JEV_MODEL', () => {
-  assert.throws(() => loadConfig({}), /AI_GATEWAY_API_KEY/);
-  assert.throws(() => loadConfig({ JEV_API_KEY: 'jv' }), /AI_GATEWAY_API_KEY/);
-  assert.throws(() => loadConfig({ AI_GATEWAY_API_KEY: 'k', JEV_MODEL: 'jev-latest' }), /typesafe-ai\/jev/);
-  const config = loadConfig({ AI_GATEWAY_API_KEY: 'k', JEV_MODEL: 'typesafe-ai/jev' });
-  assert.deepEqual(config.jev, { apiKey: 'k', timeoutMs: 15_000, zeroDataRetention: false });
+test('checked-in defaults are valid and safe: dry run, add-only thresholds, report-only refiles', () => {
+  const config = loadConfig(secretsEnv);
   assert.equal(config.dryRun, true);
   assert.equal(config.minConfidence, 0.7);
+  assert.equal(config.misfiledMinConfidence, 0.9);
   assert.equal(config.refileMisfiled, false);
+  assert.deepEqual(config.secrets, { aiGatewayApiKey: 'k', xClientId: 'cid', xClientSecret: undefined, kv: undefined });
+});
+
+test('env holds only secrets; retired tunables in env fail loudly instead of being ignored', () => {
+  assert.throws(() => loadConfig({}), /AI_GATEWAY_API_KEY/);
+  assert.throws(() => loadConfig({ AI_GATEWAY_API_KEY: 'k' }), /X_CLIENT_ID/);
+  for (const name of RETIRED_ENV_VARS) {
+    assert.throws(() => loadConfig({ ...secretsEnv, [name]: 'x' }), new RegExp(`retired env vars.*${name}`));
+  }
+  const kv = loadConfig({ ...secretsEnv, KV_REST_API_URL: 'https://kv.test', KV_REST_API_TOKEN: 't' }).secrets.kv;
+  assert.deepEqual(kv, { url: 'https://kv.test', token: 't' });
+});
+
+test('invalid config values are rejected at startup', () => {
+  assert.throws(() => loadConfig(secretsEnv, { ...sorterSettings, minConfidence: 1.5 }), /minConfidence/);
+  assert.throws(() => loadConfig(secretsEnv, { ...sorterSettings, jevBatchSize: 0 }), /jevBatchSize/);
+  assert.throws(() => loadConfig(secretsEnv, { ...sorterSettings, xUserId: '@chase' }), /xUserId/);
 });
 
 test('cron auth fails closed without CRON_SECRET and rejects wrong bearer tokens', () => {
@@ -55,13 +63,12 @@ test('handler rejects unauthenticated calls and ?dry_run=1 forces dry run', asyn
 });
 
 test('refreshing provider persists the rotated refresh token before using it', async () => {
-  const store = new MemoryTokenStore();
+  const store = new MemoryTokenStore({ accessToken: 'stale', refreshToken: 'seed-refresh', expiresAt: 0 });
   const bodies: string[] = [];
   let n = 0;
   const provider = new RefreshingTokenProvider({
     client: { clientId: 'cid' },
     store,
-    seedRefreshToken: 'seed-refresh',
     now: () => 0,
     fetch: async (url, init) => {
       assert.equal(String(url), X_TOKEN_URL);
@@ -77,11 +84,11 @@ test('refreshing provider persists the rotated refresh token before using it', a
   assert.deepEqual(await store.load(), { accessToken: 'access-1', refreshToken: 'refresh-1', expiresAt: 7_200_000 });
 });
 
-test('Vercel deployments refuse refresh-token auth without a persistent store', async () => {
-  await assert.rejects(
-    createTokenProvider({ clientId: 'cid', refreshToken: 'r' }, { onVercel: true }),
-    /persistent token store/,
-  );
-  const provider = await createTokenProvider({ accessToken: 'static' }, { onVercel: true });
-  assert.equal(await provider.getAccessToken(), 'static');
+test('X tokens come only from the token store: Vercel requires KV, and an empty store asks for auth:x', async () => {
+  await assert.rejects(createTokenProvider({ xClientId: 'cid' }, { key: 'k', onVercel: true }), /persistent token store/);
+  const emptyKv: typeof globalThis.fetch = async () => Response.json({ result: null });
+  const store = new UpstashTokenStore('https://kv.test', 't', 'k', emptyKv);
+  assert.equal(await store.load(), undefined);
+  const provider = new RefreshingTokenProvider({ client: { clientId: 'cid' }, store });
+  await assert.rejects(provider.getAccessToken(), /npm run auth:x/);
 });

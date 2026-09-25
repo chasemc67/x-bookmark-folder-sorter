@@ -1,26 +1,28 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
-import { parseArgs } from 'node:util';
-import { LOCAL_TOKEN_FILE } from '../src/app.js';
+import { sorterSettings } from '../config/sorter.js';
+import { createTokenStore } from '../src/app.js';
 import { requestToken, X_AUTHORIZE_URL, X_SCOPES } from '../src/x/auth.js';
 import { fetchAuthenticatedUserId } from '../src/x/client.js';
-import { FileTokenStore, UpstashTokenStore } from '../src/x/tokenStore.js';
 import { loadLocalEnv } from './env.js';
 
 /**
- * One-time local OAuth 2.0 PKCE flow. Saves tokens to the KV/Upstash store the cron uses
- * when its env vars are present, otherwise to the gitignored .x-tokens.json.
+ * One-time local OAuth 2.0 PKCE flow. Saves tokens to the Upstash/KV store the cron uses when
+ * KV_REST_API_URL/TOKEN are in .env, otherwise to the gitignored .x-tokens.json.
+ * Re-run it whenever the stored refresh token is revoked.
  */
-const { values } = parseArgs({ options: { 'print-refresh-token': { type: 'boolean', default: false } } });
 loadLocalEnv();
 
 const clientId = process.env.X_CLIENT_ID?.trim();
 const clientSecret = process.env.X_CLIENT_SECRET?.trim() || undefined;
-const redirectUri = process.env.X_REDIRECT_URI?.trim() || 'http://127.0.0.1:8787/callback';
+const redirectUri = sorterSettings.xRedirectUri;
 if (!clientId) {
   console.error('Set X_CLIENT_ID (and X_CLIENT_SECRET for a confidential client) in .env first.');
   process.exit(2);
 }
+const kvUrl = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
+const kvToken = process.env.KV_REST_API_TOKEN ?? process.env.UPSTASH_REDIS_REST_TOKEN;
+const store = createTokenStore({ kv: kvUrl && kvToken ? { url: kvUrl, token: kvToken } : undefined }, sorterSettings.xTokenStoreKey, false);
 
 const verifier = randomBytes(32).toString('base64url');
 const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -51,22 +53,12 @@ const server = createServer(async (req, res) => {
       { grant_type: 'authorization_code', code, redirect_uri: redirectUri, code_verifier: verifier },
       { clientId, clientSecret },
     );
-    // Refresh tokens are single-use, so exactly one store may hold them.
-    const kvUrl = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
-    const kvToken = process.env.KV_REST_API_TOKEN ?? process.env.UPSTASH_REDIS_REST_TOKEN;
-    if (kvUrl && kvToken) {
-      await new UpstashTokenStore(kvUrl, kvToken, process.env.X_TOKEN_STORE_KEY ?? 'x-bookmark-folder-sorter:x-oauth').save(tokens);
-      console.log('Saved tokens to the Upstash/KV token store used by the cron.');
-    } else {
-      await new FileTokenStore(LOCAL_TOKEN_FILE).save(tokens);
-      console.log(`Saved tokens to ${LOCAL_TOKEN_FILE} (local runs only).`);
-    }
+    await store.save(tokens);
+    console.log(store.kind === 'upstash'
+      ? 'Saved tokens to the Upstash/KV token store used by the cron.'
+      : 'Saved tokens to .x-tokens.json (local runs only; add KV_REST_API_URL/TOKEN to .env to seed the cron).');
     const userId = await fetchAuthenticatedUserId({ getAccessToken: async () => tokens.accessToken });
-    console.log(`X_USER_ID=${userId}`);
-    if (values['print-refresh-token']) {
-      console.log(`X_REFRESH_TOKEN=${tokens.refreshToken}`);
-      console.log('This refresh token is single-use: seed it into exactly one place (Vercel env or KV).');
-    }
+    console.log(`Your X user id is ${userId}; optionally set xUserId in config/sorter.ts to skip the lookup.`);
     res.writeHead(200, { 'content-type': 'text/plain' }).end('Authorized. You can close this tab.\n');
   } catch (error) {
     console.error(`Authorization failed: ${(error as Error).message}`);

@@ -9,15 +9,6 @@ export const X_SCOPES = ['tweet.read', 'users.read', 'bookmark.read', 'bookmark.
 
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 
-export class StaticTokenProvider implements AccessTokenProvider {
-  constructor(private readonly token: string) {
-    if (!token.trim()) throw new Error('X_ACCESS_TOKEN is empty');
-  }
-  async getAccessToken(): Promise<string> {
-    return this.token.trim();
-  }
-}
-
 export interface OAuthClientCredentials {
   clientId: string;
   /** Present for confidential ("Web App") clients; omit for public ("Native App") clients. */
@@ -60,8 +51,6 @@ export async function requestToken(
 export interface RefreshingTokenProviderOptions {
   client: OAuthClientCredentials;
   store: TokenStore;
-  /** Seeds an empty store, and is the fallback when the stored refresh token is rejected. */
-  seedRefreshToken?: string;
   log?: Log;
   fetch?: typeof globalThis.fetch;
   now?: () => number;
@@ -90,28 +79,14 @@ export class RefreshingTokenProvider implements AccessTokenProvider {
   private async resolve(): Promise<string> {
     this.current ??= await this.options.store.load();
     if (this.current && this.current.expiresAt - REFRESH_SKEW_MS > this.now()) return this.current.accessToken;
-    const seed = this.options.seedRefreshToken?.trim() || undefined;
-    const candidates = [...new Set([this.current?.refreshToken, seed].filter((token): token is string => Boolean(token)))];
-    if (candidates.length === 0) {
-      throw new Error('No X refresh token available: run `npm run auth:x` or set X_REFRESH_TOKEN');
-    }
-    let next: StoredXTokens | undefined;
-    let lastError: unknown;
-    // A re-authorized X_REFRESH_TOKEN must be able to recover from a revoked stored token.
-    for (const refreshToken of candidates) {
-      try {
-        next = await requestToken(
-          { grant_type: 'refresh_token', refresh_token: refreshToken },
-          this.options.client,
-          this.options.fetch,
-          this.now,
-        );
-        break;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    if (!next) throw lastError;
+    const refreshToken = this.current?.refreshToken;
+    if (!refreshToken) throw new Error('No X refresh token in the token store: run `npm run auth:x`');
+    const next = await requestToken(
+      { grant_type: 'refresh_token', refresh_token: refreshToken },
+      this.options.client,
+      this.options.fetch,
+      this.now,
+    );
     await this.options.store.save(next);
     this.current = next;
     this.options.log?.('x_token_refreshed', { store: this.options.store.kind, expiresAt: new Date(next.expiresAt).toISOString() });
