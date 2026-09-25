@@ -4,6 +4,7 @@ dist/
 .env
 .env.*
 !.env.example
+# Pre-Vercel Connect local X token file; no longer read, delete any leftover copy.
 .x-tokens.json
 *.log
 .DS_Store

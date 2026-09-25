@@ -1,6 +1,7 @@
 /**
  * Checked-in tunables for the sorter. Edit here and deploy; none of these are env vars.
- * Only credentials live in env (see .env.example). Values are validated at startup.
+ * Only credentials live in env (see .env.example); X OAuth credentials live in Vercel Connect.
+ * Values are validated at startup.
  */
 export interface SorterSettings {
   /** true: log planned folder assignments only. false: add bookmarks to folders (never deletes). */
@@ -36,10 +37,13 @@ export interface SorterSettings {
   /** Folder names that are never targets; bookmarks already in them are never touched. */
   excludedFolders: string[];
 
-  /** Upstash/KV key holding the rotating X OAuth tokens. */
-  xTokenStoreKey: string;
-  /** Callback registered on the X app for `npm run auth:x`. */
-  xRedirectUri: string;
+  /** Vercel Connect Custom OAuth connector uid. The X client id/secret live in the connector. */
+  xConnectConnector: string;
+  /**
+   * Vercel Connect `user` subject whose X grant the cron uses. One subject is one authorized
+   * X account; a multi-user version would pass each user's own subject id instead.
+   */
+  xConnectSubjectId: string;
 }
 
 export const sorterSettings: SorterSettings = {
@@ -64,6 +68,6 @@ export const sorterSettings: SorterSettings = {
   },
   excludedFolders: [],
 
-  xTokenStoreKey: 'x-bookmark-folder-sorter:x-oauth',
-  xRedirectUri: 'http://127.0.0.1:8787/callback',
+  xConnectConnector: 'oauth/x-bookmarks',
+  xConnectSubjectId: 'chase',
 };

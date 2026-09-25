@@ -32,7 +32,7 @@ export async function handleSortRequest(request: Request, deps: HandlerDeps = {}
       actionsTruncated: summary.actions.length > MAX_ACTIONS_IN_RESPONSE,
     }, { status: summary.aborted ? 502 : 200 });
   } catch (error) {
-    log('run_failed', { message: (error as Error).message });
+    log('run_failed', { error: (error as Error).name, message: (error as Error).message });
     return Response.json({ ok: false, error: (error as Error).message }, { status: 500 });
   }
 }
