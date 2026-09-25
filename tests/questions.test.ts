@@ -21,15 +21,15 @@ test('batch request shares one trimmed state and asks one choice per bookmark', 
   const options = buildFolderOptions([{ id: '1', name: 'AI' }]);
   const request = buildBatchRequest(
     [
-      { bookmark: { id: '11', text: 'a  b\n c', authorUsername: 'someone' }, currentFolders: [] },
-      { bookmark: { id: '12', text: 'x'.repeat(100) }, currentFolders: ['AI'] },
+      { bookmark: { id: '11', text: 'a  b\n c', authorUsername: 'someone' } },
+      { bookmark: { id: '12', text: 'x'.repeat(100) } },
     ],
     options,
     { maxTextChars: 50, folderDescriptions: { AI: 'machine learning' } },
   );
-  const state = request.state as { folders: string[]; bookmarks: { author: string | null; text: string; current_folders: string[] }[] };
+  const state = request.state as { folders: string[]; bookmarks: { author: string | null; text: string }[] };
   assert.deepEqual(state.folders, ['AI']);
-  assert.deepEqual(state.bookmarks[0], { author: '@someone', text: 'a b c', current_folders: [] });
+  assert.deepEqual(state.bookmarks[0], { author: '@someone', text: 'a b c' });
   assert.equal(state.bookmarks[1]!.text.length, 50);
   assert.deepEqual(Object.keys(request.questions), ['bookmark_11', 'bookmark_12']);
   assert.deepEqual(request.questionTweetIds, { bookmark_11: '11', bookmark_12: '12' });
@@ -38,7 +38,7 @@ test('batch request shares one trimmed state and asks one choice per bookmark', 
   assert.deepEqual(Object.keys(question.criteria), ['AI', KEEP_UNFILED, SKIP]);
   assert.match(String(question.criteria.AI), /machine learning/);
   assert.match(String(question.instructions), /`bookmarks\[1\]`/);
-  assert.match(String(question.instructions), /already in "AI"/);
+  assert.match(String(question.instructions), /currently unfiled/);
 });
 
 test('trimText collapses whitespace and caps length', () => {

@@ -8,8 +8,8 @@ import {
   type ConnectTokenResponse,
   type getTokenResponse,
 } from '@vercel/connect';
-import { sorterSettings } from '../config/sorter.js';
-import { loadConfig, RETIRED_ENV_VARS } from '../src/config.js';
+import { sorterSettings, type SorterSettings } from '../config/sorter.js';
+import { loadConfig, RETIRED_ENV_VARS, RETIRED_SETTINGS } from '../src/config.js';
 import { checkCronAuth } from '../src/cronAuth.js';
 import { handleSortRequest } from '../src/handler.js';
 import { silentLog } from '../src/log.js';
@@ -18,12 +18,11 @@ import { ConnectTokenProvider, X_SCOPES, XAuthorizationRequiredError } from '../
 
 const secretsEnv = { AI_GATEWAY_API_KEY: 'k' };
 
-test('checked-in defaults are valid and safe: dry run, add-only thresholds, report-only refiles', () => {
+test('checked-in defaults are valid and safe: dry run, unfiled-only, no misfile/refile settings', () => {
   const config = loadConfig(secretsEnv);
   assert.equal(config.dryRun, true);
   assert.equal(config.minConfidence, 0.7);
-  assert.equal(config.misfiledMinConfidence, 0.9);
-  assert.equal(config.refileMisfiled, false);
+  for (const name of Object.keys(RETIRED_SETTINGS)) assert.equal(name in config, false, name);
   assert.equal(config.xConnectConnector, 'oauth/x-bookmarks');
   assert.equal(config.xConnectSubjectId, 'MRaz5FqERysDw0algrlADHti');
   assert.equal(config.xUserId, '249951215');
@@ -39,6 +38,17 @@ test('env holds only secrets; retired env vars (tunables, X OAuth, KV) fail loud
     assert.ok(name in RETIRED_ENV_VARS, name);
   }
   assert.throws(() => loadConfig({ ...secretsEnv, KV_REST_API_URL: 'https://kv.test' }), /disconnect the Upstash\/KV integration/);
+});
+
+test('retired misfile/refile settings cannot be turned back on: startup rejects them', () => {
+  assert.deepEqual(Object.keys(RETIRED_SETTINGS).sort(), ['checkMisfiled', 'misfiledMinConfidence', 'refileMisfiled']);
+  for (const [name, value] of [['checkMisfiled', true], ['refileMisfiled', true], ['misfiledMinConfidence', 0.9], ['refileMisfiled', false]] as const) {
+    const settings = { ...sorterSettings, [name]: value } as unknown as SorterSettings;
+    assert.throws(() => loadConfig(secretsEnv, settings), new RegExp(`retired settings.*${name}.*only files unfiled`));
+  }
+  for (const name of ['CHECK_MISFILED', 'REFILE_MISFILED', 'MISFILED_MIN_CONFIDENCE']) {
+    assert.throws(() => loadConfig({ ...secretsEnv, [name]: 'true' }), /only files unfiled bookmarks/);
+  }
 });
 
 test('invalid config values are rejected at startup', () => {

@@ -93,7 +93,8 @@ export class XClient {
       const page = await this.request<Page<T>>('GET', `${path}?${query}`);
       yield page;
       token = page.meta?.next_token;
-      if (token && seen.has(token)) break;
+      // A truncated folder listing would make filed bookmarks look unfiled, so fail the run instead.
+      if (token && seen.has(token)) throw new XApiError(0, `GET ${path}`, 'pagination repeated a next_token; listing is incomplete');
       if (token) seen.add(token);
     } while (token);
   }

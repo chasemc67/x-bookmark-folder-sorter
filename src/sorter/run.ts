@@ -3,7 +3,7 @@ import { JevError } from '../jev/client.js';
 import type { ChoiceAnswer, JevClient } from '../jev/types.js';
 import type { Log } from '../log.js';
 import { MAX_LISTABLE_BOOKMARKS, MAX_TWEET_IDS_PER_ADD, type XClient } from '../x/client.js';
-import type { Bookmark } from '../x/types.js';
+import type { BookmarkFolder } from '../x/types.js';
 import { planActions, WRITE_KINDS, type ActionKind, type PlannedAction } from './plan.js';
 import { buildBatchRequest, buildFolderOptions, trimText, type ClassificationItem } from './questions.js';
 
@@ -11,9 +11,6 @@ export type SorterRunConfig = Pick<
   SorterConfig,
   | 'dryRun'
   | 'minConfidence'
-  | 'misfiledMinConfidence'
-  | 'checkMisfiled'
-  | 'refileMisfiled'
   | 'maxBookmarksPerRun'
   | 'maxWritesPerRun'
   | 'jevBatchSize'
@@ -27,8 +24,11 @@ export type XBookmarksApi = Pick<XClient, 'listFolders' | 'listFolderPostIds' | 
 export interface ReportedAction extends PlannedAction {
   author?: string;
   preview: string;
-  /** Live mode only: whether the add-to-folder write succeeded, failed, or hit MAX_WRITES_PER_RUN. */
-  write?: 'added' | 'failed' | 'deferred';
+  /**
+   * Live mode only: whether the add-to-folder write succeeded, failed, hit maxWritesPerRun, or was
+   * skipped because the bookmark was found in a folder when membership was re-read before writing.
+   */
+  write?: 'added' | 'failed' | 'deferred' | 'skipped_now_filed';
 }
 
 export interface RunSummary {
@@ -40,7 +40,7 @@ export interface RunSummary {
   unfiled: number;
   classified: number;
   counts: Partial<Record<ActionKind, number>>;
-  writes: { attempted: number; added: number; failed: number; deferred: number };
+  writes: { attempted: number; added: number; failed: number; deferred: number; skippedNowFiled: number };
   jevInputTokens: number;
   actions: ReportedAction[];
   aborted?: string;
@@ -50,6 +50,15 @@ function chunk<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
   return chunks;
+}
+
+/** IDs of every post in any folder, excluded folders included. A failed or partial listing throws. */
+async function listFiledTweetIds(x: XBookmarksApi, folders: BookmarkFolder[]): Promise<Set<string>> {
+  const filed = new Set<string>();
+  for (const folder of [...folders].sort((a, b) => a.id.localeCompare(b.id))) {
+    for (const tweetId of await x.listFolderPostIds(folder.id)) filed.add(tweetId);
+  }
+  return filed;
 }
 
 export async function runSorter(
@@ -66,7 +75,7 @@ export async function runSorter(
     unfiled: 0,
     classified: 0,
     counts: {},
-    writes: { attempted: 0, added: 0, failed: 0, deferred: 0 },
+    writes: { attempted: 0, added: 0, failed: 0, deferred: 0, skippedNowFiled: 0 },
     jevInputTokens: 0,
     actions: [],
   };
@@ -81,39 +90,19 @@ export async function runSorter(
     return summary;
   }
 
-  const folderById = new Map(folders.map(folder => [folder.id, folder]));
-  const excludedIds = new Set(folders.filter(folder => !options.some(option => option.folder.id === folder.id)).map(folder => folder.id));
-  const membership = new Map<string, string[]>();
-  for (const folder of [...folders].sort((a, b) => a.id.localeCompare(b.id))) {
-    for (const tweetId of await x.listFolderPostIds(folder.id)) {
-      membership.set(tweetId, [...(membership.get(tweetId) ?? []), folder.id]);
-    }
-  }
+  const targetFolderIds = new Set(options.map(option => option.folder.id));
+  const filed = await listFiledTweetIds(x, folders);
 
   const bookmarks = await x.listBookmarks(MAX_LISTABLE_BOOKMARKS);
   summary.bookmarksListed = bookmarks.length;
   const bookmarkIds = new Set(bookmarks.map(bookmark => bookmark.id));
-  const unfiled = bookmarks.filter(bookmark => !membership.has(bookmark.id));
+  // Only unfiled bookmarks are ever classified. A bookmark in any folder is never read into Jev,
+  // planned, or written, so its folder can never change.
+  const unfiled = bookmarks.filter(bookmark => !filed.has(bookmark.id));
   summary.unfiled = unfiled.length;
-  // Bookmarks in excluded folders are left alone entirely.
-  const filed = config.checkMisfiled
-    ? bookmarks.filter(bookmark => {
-      const ids = membership.get(bookmark.id);
-      return ids !== undefined && !ids.some(id => excludedIds.has(id));
-    })
-    : [];
-
-  const toItem = (bookmark: Bookmark) => {
-    const currentFolderIds = membership.get(bookmark.id) ?? [];
-    return {
-      bookmark,
-      currentFolderIds,
-      currentFolders: currentFolderIds.map(id => folderById.get(id)?.name ?? id),
-    };
-  };
-  const items: (ClassificationItem & { currentFolderIds: string[] })[] = [...unfiled, ...filed]
+  const items: ClassificationItem[] = unfiled
     .slice(0, config.maxBookmarksPerRun)
-    .map(toItem);
+    .map(bookmark => ({ bookmark }));
   summary.classified = items.length;
 
   const answers = new Map<string, ChoiceAnswer | undefined>();
@@ -152,14 +141,35 @@ export async function runSorter(
     for (const action of writable.slice(config.maxWritesPerRun)) action.write = 'deferred';
     summary.writes.deferred = writable.length - allowed.length;
 
-    const byFolder = new Map<string, string[]>();
     for (const action of allowed) {
-      const folderId = action.targetFolderId!;
-      // Only ever send posts that are already bookmarked into folders that already exist.
-      if (!folderById.has(folderId) || !bookmarkIds.has(action.tweetId)) {
-        throw new Error('Refusing to write: planned action references an unknown folder or bookmark');
+      // Only ever send unfiled posts that are already bookmarked into target folders that already exist.
+      if (action.kind !== 'file' || filed.has(action.tweetId) || !bookmarkIds.has(action.tweetId)) {
+        throw new Error('Refusing to write: planned action is not an unfiled bookmark from this run');
       }
-      byFolder.set(folderId, [...(byFolder.get(folderId) ?? []), action.tweetId]);
+      if (!targetFolderIds.has(action.targetFolderId!)) {
+        throw new Error('Refusing to write: planned action references an unknown or excluded folder');
+      }
+    }
+
+    // Re-read folder membership right before writing, so a bookmark filed (by hand or by another
+    // run) after the first listing is left alone rather than added to a second folder.
+    const byFolder = new Map<string, string[]>();
+    if (allowed.length > 0) {
+      const freshFolders = await x.listFolders();
+      const freshFolderIds = new Set(freshFolders.map(folder => folder.id));
+      const filedNow = await listFiledTweetIds(x, freshFolders);
+      for (const action of allowed) {
+        if (filedNow.has(action.tweetId)) {
+          action.write = 'skipped_now_filed';
+          summary.writes.skippedNowFiled += 1;
+          continue;
+        }
+        const folderId = action.targetFolderId!;
+        if (!freshFolderIds.has(folderId)) {
+          throw new Error('Refusing to write: target folder no longer exists');
+        }
+        byFolder.set(folderId, [...(byFolder.get(folderId) ?? []), action.tweetId]);
+      }
     }
     for (const [folderId, tweetIds] of [...byFolder.entries()].sort(([a], [b]) => a.localeCompare(b))) {
       for (const ids of chunk(tweetIds, MAX_TWEET_IDS_PER_ADD)) {
