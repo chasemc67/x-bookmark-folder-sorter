@@ -33,7 +33,7 @@ export interface ReportedAction extends PlannedAction {
 
 export interface RunSummary {
   dryRun: boolean;
-  jevProvider: string;
+  jevModel: string;
   folders: number;
   targetFolders: number;
   bookmarksListed: number;
@@ -42,7 +42,6 @@ export interface RunSummary {
   counts: Partial<Record<ActionKind, number>>;
   writes: { attempted: number; added: number; failed: number; deferred: number };
   jevInputTokens: number;
-  jevCostUsd?: number;
   actions: ReportedAction[];
   aborted?: string;
 }
@@ -60,7 +59,7 @@ export async function runSorter(
   const { x, jev, log } = deps;
   const summary: RunSummary = {
     dryRun: config.dryRun,
-    jevProvider: jev.provider,
+    jevModel: jev.model,
     folders: 0,
     targetFolders: 0,
     bookmarksListed: 0,
@@ -71,7 +70,7 @@ export async function runSorter(
     jevInputTokens: 0,
     actions: [],
   };
-  log('run_start', { dryRun: config.dryRun, jevProvider: jev.provider });
+  log('run_start', { dryRun: config.dryRun, jevModel: jev.model });
 
   const folders = await x.listFolders();
   summary.folders = folders.length;
@@ -118,28 +117,22 @@ export async function runSorter(
   summary.classified = items.length;
 
   const answers = new Map<string, ChoiceAnswer | undefined>();
-  let costUsd = 0;
-  let sawCost = false;
   for (const [batchIndex, batch] of chunk(items, config.jevBatchSize).entries()) {
     if (summary.aborted) break;
     const request = buildBatchRequest(batch, options, config);
     try {
       const result = await jev.decide(request.state, request.questions);
       summary.jevInputTokens += result.inputTokens ?? 0;
-      if (result.costUsd !== undefined) {
-        costUsd += result.costUsd;
-        sawCost = true;
-      }
       for (const [questionId, tweetId] of Object.entries(request.questionTweetIds)) {
         answers.set(tweetId, result.answers[questionId]);
       }
     } catch (error) {
       const status = error instanceof JevError ? error.status : undefined;
       log('jev_batch_failed', { batchIndex, size: batch.length, status, message: (error as Error).message });
-      if (status === 401 || status === 402) summary.aborted = (error as Error).message;
+      // Auth and billing failures will not recover within this run.
+      if (status === 401 || status === 402 || status === 403) summary.aborted = (error as Error).message;
     }
   }
-  if (sawCost) summary.jevCostUsd = Number(costUsd.toFixed(6));
 
   const planned = planActions(items, answers, options, config);
   const itemById = new Map(items.map(item => [item.bookmark.id, item]));
@@ -211,7 +204,6 @@ export async function runSorter(
     counts: summary.counts,
     writes: summary.writes,
     jevInputTokens: summary.jevInputTokens,
-    jevCostUsd: summary.jevCostUsd,
     aborted: summary.aborted,
   });
   return summary;

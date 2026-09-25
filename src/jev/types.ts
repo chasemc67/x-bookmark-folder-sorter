@@ -13,7 +13,7 @@ export interface ChoiceAnswer {
   choice: string;
   /** Complete distribution over the question's options. */
   probabilities: Record<string, number>;
-  /** 0-1 concentration of `probabilities`; computed locally when a backend omits it. */
+  /** 0-1 concentration of `probabilities`, computed with TypeSafe's documented formula. */
   confidence: number;
 }
 
@@ -21,12 +21,9 @@ export interface DecideResult {
   /** Answers that failed validation are omitted so callers fail closed per question. */
   answers: Record<string, ChoiceAnswer>;
   inputTokens?: number;
-  costUsd?: number;
 }
 
 export interface JevClient {
-  readonly provider: JevProvider;
+  readonly model: string;
   decide(state: JevInput, questions: Record<string, ChoiceQuestion>, signal?: AbortSignal): Promise<DecideResult>;
 }
-
-export type JevProvider = 'jev' | 'typesafe' | 'gateway';

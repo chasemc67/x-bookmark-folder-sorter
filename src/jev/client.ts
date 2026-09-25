@@ -1,12 +1,12 @@
 import { createGateway } from '@ai-sdk/gateway';
 import { experimental_evaluate as evaluate } from 'ai';
 import type { Log } from '../log.js';
-import type { ChoiceAnswer, ChoiceQuestion, DecideResult, JevClient, JevInput, JevProvider } from './types.js';
+import type { ChoiceAnswer, ChoiceQuestion, DecideResult, JevClient, JevInput } from './types.js';
 
-export const JEV_PROXY_URL = 'https://jevtypesafeai.com/api/v1/decide';
-export const TYPESAFE_URL = 'https://api.typesafe.ai/v1/systemone';
-export const TYPESAFE_DEFAULT_MODEL = 'jev-latest';
-export const GATEWAY_JEV_MODEL = 'typesafe-ai/jev';
+export const JEV_MODEL = 'typesafe-ai/jev';
+// The SDK protocol endpoint differs from Gateway's public REST /v1/evaluate.
+const GATEWAY_BASE_URL = 'https://ai-gateway.vercel.sh/v4/ai';
+export const EVALUATION_URL = `${GATEWAY_BASE_URL}/evaluation-model`;
 
 export class JevError extends Error {
   constructor(
@@ -33,7 +33,10 @@ export function choiceConfidence(probabilities: Record<string, number>): number 
   return Math.max(0, Math.min(1, (values.length * peak - 1) / (values.length - 1)));
 }
 
-/** Rejects anything that is not a well-formed Choice answer over exactly the asked options. */
+/**
+ * Rejects anything that is not a well-formed Choice answer over exactly the asked options.
+ * The SDK marks `probabilities` optional; without them there is nothing to gate on, so fail closed.
+ */
 export function parseChoiceAnswer(question: ChoiceQuestion, raw: unknown): ChoiceAnswer | undefined {
   if (!isRecord(raw) || raw.type !== 'choice' || typeof raw.choice !== 'string') return undefined;
   const options = Object.keys(question.criteria);
@@ -46,180 +49,135 @@ export function parseChoiceAnswer(question: ChoiceQuestion, raw: unknown): Choic
     if (!isProbability(value)) return undefined;
     probabilities[option] = value;
   }
-  const computed = choiceConfidence(probabilities);
-  const confidence = isProbability(raw.confidence) ? raw.confidence : computed;
+  const confidence = isProbability(raw.confidence) ? raw.confidence : choiceConfidence(probabilities);
   return { choice: raw.choice, probabilities, confidence };
 }
 
-function parseAnswers(questions: Record<string, ChoiceQuestion>, answers: unknown): Record<string, ChoiceAnswer> {
-  if (!isRecord(answers)) throw new JevError('Jev response had no answers map');
-  const parsed: Record<string, ChoiceAnswer> = {};
-  for (const [id, question] of Object.entries(questions)) {
-    const answer = parseChoiceAnswer(question, answers[id]);
-    if (answer) parsed[id] = answer;
-  }
-  return parsed;
+function abortError(): DOMException {
+  return new DOMException('Jev evaluation cancelled', 'AbortError');
 }
 
-function delay(ms: number, signal?: AbortSignal): Promise<void> {
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    if (signal?.aborted) return reject(signal.reason);
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener('abort', () => {
+    if (signal.aborted) {
+      reject(abortError());
+      return;
+    }
+    const onAbort = () => {
       clearTimeout(timer);
-      reject(signal.reason);
-    }, { once: true });
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
   });
 }
 
-function withTimeout(timeoutMs: number, signal?: AbortSignal): AbortSignal {
-  const timeout = AbortSignal.timeout(timeoutMs);
-  return signal ? AbortSignal.any([signal, timeout]) : timeout;
-}
-
-export interface HttpJevClientOptions {
-  provider: 'jev' | 'typesafe';
-  apiKey: string;
-  url?: string;
-  /** Sent as `model` for the official API; the jevtypesafeai.com proxy picks its own. */
-  model?: string;
-  timeoutMs?: number;
-  maxAttempts?: number;
-  log?: Log;
-  fetch?: typeof globalThis.fetch;
-}
-
-/** Raw HTTP client for the jevtypesafeai.com proxy and the official TypeSafe API (same request shape). */
-export class HttpJevClient implements JevClient {
-  readonly provider: 'jev' | 'typesafe';
-  private readonly url: string;
-  private readonly fetch: typeof globalThis.fetch;
-
-  constructor(private readonly options: HttpJevClientOptions) {
-    if (!options.apiKey.trim()) {
-      throw new Error(options.provider === 'jev' ? 'JEV_API_KEY is required' : 'TYPESAFE_API_KEY is required');
-    }
-    this.provider = options.provider;
-    this.url = options.url ?? (options.provider === 'jev' ? JEV_PROXY_URL : TYPESAFE_URL);
-    this.fetch = options.fetch ?? globalThis.fetch;
-  }
-
-  async decide(state: JevInput, questions: Record<string, ChoiceQuestion>, signal?: AbortSignal): Promise<DecideResult> {
-    const body = JSON.stringify({
-      state,
-      ...(this.options.model ? { model: this.options.model } : {}),
-      questions,
-    });
-    const maxAttempts = this.options.maxAttempts ?? 3;
-    for (let attempt = 1; ; attempt += 1) {
-      let response: Response;
-      try {
-        response = await this.fetch(this.url, {
-          method: 'POST',
-          headers: { authorization: `Bearer ${this.options.apiKey.trim()}`, 'content-type': 'application/json' },
-          body,
-          redirect: 'error',
-          signal: withTimeout(this.options.timeoutMs ?? 20_000, signal),
-        });
-      } catch (error) {
-        if (signal?.aborted || attempt >= maxAttempts) throw new JevError(`Jev request failed: ${(error as Error).name}`);
-        await delay(250 * 2 ** attempt, signal);
-        continue;
-      }
-      if (response.ok) {
-        const json = (await response.json()) as { answers?: unknown; usage?: { input_tokens?: unknown; cost_usd?: unknown } };
-        return {
-          answers: parseAnswers(questions, json.answers),
-          inputTokens: typeof json.usage?.input_tokens === 'number' ? json.usage.input_tokens : undefined,
-          costUsd: typeof json.usage?.cost_usd === 'number' ? json.usage.cost_usd : undefined,
-        };
-      }
-      const retryable = response.status === 429 || response.status === 529 || response.status >= 500;
-      if (retryable && attempt < maxAttempts) {
-        this.options.log?.('jev_retry', { provider: this.provider, status: response.status, attempt });
-        await delay(250 * 2 ** attempt, signal);
-        continue;
-      }
-      if (response.status === 402) throw new JevError('Jev prepaid balance is empty (HTTP 402); top up at jevtypesafeai.com/pricing', 402);
-      if (response.status === 401) throw new JevError('Jev rejected the API key (HTTP 401)', 401);
-      throw new JevError(`Jev request failed with HTTP ${response.status}`, response.status);
-    }
-  }
-}
-
 export interface GatewayJevClientOptions {
-  /** Omit on Vercel to authenticate with the deployment's OIDC token. */
-  apiKey?: string;
-  model?: string;
+  apiKey: string;
+  /** Total deadline per batch, including the one permitted retry. */
   timeoutMs?: number;
   zeroDataRetention?: boolean;
-  fetch?: typeof globalThis.fetch;
+  log?: Log;
 }
 
-/** Vercel AI Gateway `typesafe-ai/jev` through the AI SDK, matching Jevis. */
-export class GatewayJevClient implements JevClient {
-  readonly provider = 'gateway' as const;
+export interface GatewayJevClientDependencies {
+  /** Test transport injection; the destination remains fixed to AI Gateway. */
+  fetch?: typeof globalThis.fetch;
+  random?: () => number;
+}
 
-  constructor(private readonly options: GatewayJevClientOptions = {}) {}
+/** Jev `typesafe-ai/jev` via Vercel AI Gateway only, mirroring the Jevis client. */
+export class GatewayJevClient implements JevClient {
+  readonly model = JEV_MODEL;
+  private readonly timeoutMs: number;
+  private readonly fetch: typeof globalThis.fetch;
+  private readonly random: () => number;
+
+  constructor(
+    private readonly options: GatewayJevClientOptions,
+    dependencies: GatewayJevClientDependencies = {},
+  ) {
+    if (!options.apiKey.trim()) throw new Error('AI_GATEWAY_API_KEY is required for Jev');
+    this.timeoutMs = options.timeoutMs ?? 15_000;
+    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) throw new Error('Jev timeout must be positive');
+    this.fetch = dependencies.fetch ?? globalThis.fetch;
+    this.random = dependencies.random ?? Math.random;
+  }
 
   async decide(state: JevInput, questions: Record<string, ChoiceQuestion>, signal?: AbortSignal): Promise<DecideResult> {
+    let status: number | undefined;
+    const controller = new AbortController();
+    const onAbort = () => controller.abort(abortError());
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new DOMException('Jev evaluation timed out', 'TimeoutError'));
+    }, this.timeoutMs);
+
     const gateway = createGateway({
-      ...(this.options.apiKey?.trim() ? { apiKey: this.options.apiKey.trim() } : {}),
-      ...(this.options.fetch ? { fetch: this.options.fetch } : {}),
+      apiKey: this.options.apiKey.trim(),
+      baseURL: GATEWAY_BASE_URL,
+      fetch: async (url, init) => {
+        // Disallow alternate destinations and redirects even if upstream SDK behavior changes.
+        if (String(url) !== EVALUATION_URL) throw new Error('Unexpected Gateway endpoint');
+        const response = await this.fetch(url, { ...init, redirect: 'error' });
+        status = response.status;
+        return response;
+      },
     });
+
     try {
-      const result = await evaluate({
-        model: gateway.evaluationModel(this.options.model ?? GATEWAY_JEV_MODEL),
-        state,
-        questions,
-        maxRetries: 2,
-        abortSignal: withTimeout(this.options.timeoutMs ?? 20_000, signal),
-        providerOptions: {
-          gateway: {
-            only: ['typesafe-ai'],
-            ...(this.options.zeroDataRetention ? { zeroDataRetention: true } : {}),
-          },
-        },
-      });
-      return {
-        answers: parseAnswers(questions, result.answers),
-        inputTokens: result.usage.inputTokens,
-      };
-    } catch (error) {
-      if (error instanceof JevError) throw error;
-      // SDK errors can embed request headers or payloads; surface only the error class.
-      throw new JevError(`AI Gateway Jev evaluation failed: ${(error as Error).name}`);
+      for (let attempt = 0; ; attempt += 1) {
+        status = undefined;
+        try {
+          const result = await evaluate({
+            model: gateway.evaluationModel(JEV_MODEL),
+            state,
+            questions,
+            abortSignal: controller.signal,
+            maxRetries: 0,
+            providerOptions: {
+              gateway: {
+                only: ['typesafe-ai'],
+                ...(this.options.zeroDataRetention ? { zeroDataRetention: true } : {}),
+              },
+            },
+          });
+          const answers = result.answers as unknown;
+          if (!isRecord(answers)) throw new JevError('Jev response had no answers map', status);
+          const parsed: Record<string, ChoiceAnswer> = {};
+          for (const [id, question] of Object.entries(questions)) {
+            const answer = parseChoiceAnswer(question, answers[id]);
+            if (answer) parsed[id] = answer;
+          }
+          return { answers: parsed, inputTokens: result.usage.inputTokens };
+        } catch (error) {
+          if (signal?.aborted) throw abortError();
+          if (timedOut) throw new JevError('Jev evaluation timed out');
+          if (error instanceof JevError) throw error;
+          // Use the observed HTTP status: SDK-wrapped parser/network errors can look like 500s.
+          const retryable = status === 429 || (status !== undefined && status >= 500 && status <= 599);
+          if (attempt === 0 && retryable) {
+            const delayMs = 100 + Math.floor(this.random() * 150);
+            this.options.log?.('jev_retry', { status, delayMs });
+            await abortableDelay(delayMs, controller.signal);
+            continue;
+          }
+          // Never surface SDK error text: it may embed authorization headers or bookmark payloads.
+          throw new JevError(
+            status === undefined ? 'Jev network error' : status >= 200 && status < 300 ? 'Jev malformed answers' : `Jev gateway HTTP ${status}`,
+            status,
+          );
+        }
+      }
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', onAbort);
     }
-  }
-}
-
-export interface JevEnvConfig {
-  provider: JevProvider;
-  apiKey?: string;
-  url?: string;
-  model?: string;
-  timeoutMs: number;
-  zeroDataRetention: boolean;
-}
-
-export function createJevClient(config: JevEnvConfig, log?: Log): JevClient {
-  switch (config.provider) {
-    case 'jev':
-    case 'typesafe':
-      return new HttpJevClient({
-        provider: config.provider,
-        apiKey: config.apiKey ?? '',
-        url: config.url,
-        model: config.provider === 'typesafe' ? config.model ?? TYPESAFE_DEFAULT_MODEL : config.model,
-        timeoutMs: config.timeoutMs,
-        log,
-      });
-    case 'gateway':
-      return new GatewayJevClient({
-        apiKey: config.apiKey,
-        model: config.model,
-        timeoutMs: config.timeoutMs,
-        zeroDataRetention: config.zeroDataRetention,
-      });
   }
 }

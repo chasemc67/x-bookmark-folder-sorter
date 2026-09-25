@@ -28,7 +28,7 @@ try {
   if (values.json) {
     console.log(JSON.stringify(summary, null, 2));
   } else {
-    console.log(`\n${summary.dryRun ? 'DRY RUN (no writes)' : 'LIVE'} via Jev provider "${summary.jevProvider}"`);
+    console.log(`\n${summary.dryRun ? 'DRY RUN (no writes)' : 'LIVE'} via ${summary.jevModel} on Vercel AI Gateway`);
     console.log(`folders=${summary.folders} targets=${summary.targetFolders} bookmarks=${summary.bookmarksListed} unfiled=${summary.unfiled} classified=${summary.classified}`);
     console.log('counts:', summary.counts);
     if (!summary.dryRun) console.log('writes:', summary.writes);

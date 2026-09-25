@@ -1,5 +1,5 @@
 import { loadConfig, type Env, type XEnvConfig } from './config.js';
-import { createJevClient } from './jev/client.js';
+import { GatewayJevClient } from './jev/client.js';
 import type { Log } from './log.js';
 import { runSorter, type RunSummary } from './sorter/run.js';
 import { RefreshingTokenProvider, StaticTokenProvider } from './x/auth.js';
@@ -48,6 +48,6 @@ export async function runFromEnv(
   const tokens = await createTokenProvider(config.x, { onVercel, log: options.log });
   const userId = config.x.userId ?? await fetchAuthenticatedUserId(tokens);
   const x = new XClient({ tokens, userId, log: options.log });
-  const jev = createJevClient(config.jev, options.log);
+  const jev = new GatewayJevClient({ ...config.jev, log: options.log });
   return runSorter(config, { x, jev, log: options.log });
 }

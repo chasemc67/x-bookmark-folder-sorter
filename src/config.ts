@@ -1,7 +1,12 @@
-import type { JevEnvConfig } from './jev/client.js';
-import type { JevProvider } from './jev/types.js';
+import { JEV_MODEL } from './jev/client.js';
 
 export type Env = Record<string, string | undefined>;
+
+export interface JevEnvConfig {
+  apiKey: string;
+  timeoutMs: number;
+  zeroDataRetention: boolean;
+}
 
 export interface XEnvConfig {
   userId?: string;
@@ -76,31 +81,15 @@ function folderDescriptions(env: Env): Record<string, string> {
   return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
 }
 
+/** Jev is reached only through Vercel AI Gateway, never the TypeSafe API or a proxy. */
 function jevConfig(env: Env): JevEnvConfig {
-  const explicit = text(env, 'JEV_PROVIDER')?.toLowerCase();
-  if (explicit && !['jev', 'typesafe', 'gateway'].includes(explicit)) {
-    throw new Error('JEV_PROVIDER must be jev, typesafe, or gateway');
-  }
-  const provider: JevProvider | undefined = (explicit as JevProvider | undefined)
-    ?? (text(env, 'JEV_API_KEY') ? 'jev'
-      : text(env, 'TYPESAFE_API_KEY') ? 'typesafe'
-        : text(env, 'AI_GATEWAY_API_KEY') || text(env, 'VERCEL_OIDC_TOKEN') ? 'gateway'
-          : undefined);
-  if (!provider) {
-    throw new Error('Set JEV_API_KEY (jevtypesafeai.com), TYPESAFE_API_KEY, or AI_GATEWAY_API_KEY / Vercel OIDC for Jev');
-  }
-  const apiKey = provider === 'jev' ? text(env, 'JEV_API_KEY')
-    : provider === 'typesafe' ? text(env, 'TYPESAFE_API_KEY')
-      : text(env, 'AI_GATEWAY_API_KEY');
-  if (provider !== 'gateway' && !apiKey) {
-    throw new Error(`${provider === 'jev' ? 'JEV_API_KEY' : 'TYPESAFE_API_KEY'} is required for JEV_PROVIDER=${provider}`);
-  }
+  const model = text(env, 'JEV_MODEL');
+  if (model && model !== JEV_MODEL) throw new Error(`JEV_MODEL must be ${JEV_MODEL} via Vercel AI Gateway`);
+  const apiKey = text(env, 'AI_GATEWAY_API_KEY');
+  if (!apiKey) throw new Error('Set AI_GATEWAY_API_KEY for Jev via Vercel AI Gateway');
   return {
-    provider,
     apiKey,
-    url: text(env, 'JEV_API_URL'),
-    model: text(env, 'JEV_MODEL'),
-    timeoutMs: integer(env, 'JEV_TIMEOUT_MS', 20_000, 1_000, 120_000),
+    timeoutMs: integer(env, 'JEV_TIMEOUT_MS', 15_000, 1_000, 120_000),
     zeroDataRetention: bool(env, 'GATEWAY_ZERO_DATA_RETENTION', false),
   };
 }
