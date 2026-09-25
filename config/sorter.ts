@@ -69,5 +69,5 @@ export const sorterSettings: SorterSettings = {
   excludedFolders: [],
 
   xConnectConnector: 'oauth/x-bookmarks',
-  xConnectSubjectId: 'chasemc67',
+  xConnectSubjectId: 'MRaz5FqERysDw0algrlADHti',
 };

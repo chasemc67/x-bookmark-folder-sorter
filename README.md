@@ -35,7 +35,7 @@ Every tunable lives in the checked-in [`config/sorter.ts`](config/sorter.ts). Ed
 | `folderDescriptions` | `{}` | `{ "Folder name": "what belongs here" }`, which sharpens the Choice criteria |
 | `excludedFolders` | `[]` | Folder names that are never targets and never touched |
 | `xConnectConnector` | `oauth/x-bookmarks` | Vercel Connect connector uid that holds the X OAuth client |
-| `xConnectSubjectId` | `chasemc67` | Connect `user` subject whose X grant the cron uses (one subject = one X account) |
+| `xConnectSubjectId` | `MRaz5FqERysDw0algrlADHti` | Connect `user` subject whose X grant the cron uses (one subject = one X account). This is the opaque Connect user subject from the dashboard "Test User Authorization" that authorized @ChaseMc67 |
 
 The Jev model is the constant `typesafe-ai/jev` in `src/jev/client.ts`.
 
@@ -84,7 +84,7 @@ A single flat Choice fits bookmark folders, since X folders have no hierarchy. I
 
 ### X OAuth via Vercel Connect
 
-The cron calls the X API directly with a user access token for your account. It gets that token from [Vercel Connect](https://vercel.com/docs/connect): `getTokenResponse('oauth/x-bookmarks', { subject: { type: 'user', id: 'chasemc67' }, scopes })` in `src/x/auth.ts`. Connect stores the X client credentials and your grant, refreshes and rotates X's single-use refresh tokens server-side, and hands the function a short-lived access token. Nothing about X auth is stored in env, Redis, or a local file.
+The cron calls the X API directly with a user access token for your account. It gets that token from [Vercel Connect](https://vercel.com/docs/connect): `getTokenResponse('oauth/x-bookmarks', { subject: { type: 'user', id: 'MRaz5FqERysDw0algrlADHti' }, scopes })` in `src/x/auth.ts`. Connect stores the X client credentials and your grant, refreshes and rotates X's single-use refresh tokens server-side, and hands the function a short-lived access token. Nothing about X auth is stored in env, Redis, or a local file.
 
 Vercel Connect has no first-party X connector, so this uses a **Custom OAuth** connector (customer-managed: you bring your own X app client id and secret).
 
@@ -100,7 +100,7 @@ Vercel Connect has no first-party X connector, so this uses a **Custom OAuth** c
    You can also do this with the CLI from this directory: `vercel connect create --help` shows the prompts for a custom OAuth server.
 3. **Register Connect's callback on X.** Copy the OAuth callback (redirect) URL that the connector page shows and add it to your X app's callback URLs. X rejects authorizations whose redirect URL isn't registered.
 4. **Attach the connector to this project.** A connector created from the project's Connect page is linked automatically. Otherwise run `vercel connect attach oauth/x-bookmarks`, which links Production, Preview, and Development.
-5. **Authorize your X account once** for the configured subject (`xConnectSubjectId`, default `chasemc67`):
+5. **Authorize your X account once** for the configured subject (`xConnectSubjectId`, default `MRaz5FqERysDw0algrlADHti`, the Connect user subject from the successful dashboard authorization of Chase's X account; the grant already exists, so this step is only needed for a different subject or after revoking):
 
 ```bash
 vercel env pull        # fresh VERCEL_OIDC_TOKEN
@@ -109,13 +109,13 @@ npm run connect:x
 
 `connect:x` asks Connect for a token. If the subject has no grant yet, it calls `startAuthorization` and prints the X consent URL. Open it, sign in as the X account the cron should sort, approve, and press Enter. It then prints your numeric X user id, which you can put in `xUserId` to skip the `/2/users/me` lookup each run. The grant belongs to the connector and subject, not to an environment, so authorizing locally also authorizes the production cron. Re-run `npm run connect:x` if you ever revoke the app on X.
 
-If a run finds no valid grant (Connect throws `UserAuthorizationRequiredError` or `NoValidTokenError`), it fails before touching X with `X is not authorized for Connect subject "chasemc67" on connector "oauth/x-bookmarks" ... Run npm run connect:x`. The cron response is a `500` with that message and the log line is `run_failed` with `error: "XAuthorizationRequiredError"`.
+If a run finds no valid grant (Connect throws `UserAuthorizationRequiredError` or `NoValidTokenError`), it fails before touching X with `X is not authorized for Connect subject "MRaz5FqERysDw0algrlADHti" on connector "oauth/x-bookmarks" ... Run npm run connect:x`. The cron response is a `500` with that message and the log line is `run_failed` with `error: "XAuthorizationRequiredError"`.
 
 **Pricing.** Connect bills per token request (Hobby includes 500 a month; Pro is $3.00 per 1,000). The SDK caches the token in-process and the provider asks for one that stays valid for the whole run, so a daily cron costs about one token request per run.
 
 ### Single user now, multi-user later
 
-- **Now (single-user cron):** one Custom OAuth connector and one fixed Connect `user` subject (`xConnectSubjectId: 'chasemc67'`). Chase authorizes once with `npm run connect:x`, and the cron requests tokens for that subject.
+- **Now (single-user cron):** one Custom OAuth connector and one fixed Connect `user` subject (`xConnectSubjectId: 'MRaz5FqERysDw0algrlADHti'`). That id is the opaque Connect user subject created when Chase's X account (@ChaseMc67) was authorized via the dashboard's "Test User Authorization", and the cron requests tokens for that subject. `npm run connect:x` can re-authorize it if the grant is ever revoked.
 - **Later (multi-user product):** the same connector serves any number of X accounts, one Connect `user` subject per end user. A `/connect` page would call `startAuthorization(connector, { subject: { type: 'user', id: <your user id> }, scopes }, { callbackUrl })`, redirect the user to the returned URL, and store the subject-to-user mapping in your own app. The cron would then loop over those subjects and run the same sorter once per subject.
 
 The code is already shaped for that: `ConnectTokenProvider` takes the connector and subject id as parameters (`XConnectTarget`), and only `runFromEnv` reads them from config. `npm run connect:x -- --subject <id>` authorizes any subject, which is handy for trying a second account; the cron today still uses only `xConnectSubjectId`. No multi-user UI or subject storage is built yet.
