@@ -25,7 +25,8 @@ test('checked-in defaults are valid and safe: dry run, add-only thresholds, repo
   assert.equal(config.misfiledMinConfidence, 0.9);
   assert.equal(config.refileMisfiled, false);
   assert.equal(config.xConnectConnector, 'oauth/x-bookmarks');
-  assert.equal(config.xConnectSubjectId, 'chase');
+  assert.equal(config.xConnectSubjectId, 'chasemc67');
+  assert.equal(config.xUserId, '249951215');
   assert.deepEqual(config.secrets, { aiGatewayApiKey: 'k' });
 });
 
