@@ -32,7 +32,7 @@ try {
     console.log(`folders=${summary.folders} targets=${summary.targetFolders} bookmarks=${summary.bookmarksListed} unfiled=${summary.unfiled} classified=${summary.classified}`);
     console.log('counts:', summary.counts);
     if (!summary.dryRun) console.log('writes:', summary.writes);
-    for (const action of summary.actions.filter(a => a.kind === 'file' || a.kind === 'refile' || a.kind === 'misfiled_report')) {
+    for (const action of summary.actions.filter(a => a.kind === 'file')) {
       const p = action.probability?.toFixed(2) ?? '-';
       console.log(`  ${action.kind.padEnd(15)} ${action.tweetId} -> ${action.targetFolderName} (p=${p}) ${action.author ?? ''} ${action.preview}`);
     }

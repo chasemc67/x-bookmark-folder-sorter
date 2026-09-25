@@ -4,6 +4,8 @@ Sorts your X (Twitter) bookmarks into your existing bookmark folders, once a day
 
 **It never loses bookmarks.** Dry run is the default. Live mode only *adds* already-bookmarked posts into folders that already exist, using `POST /2/users/:id/bookmarks` with `folder_id`. The X client in this repo has no delete or unbookmark method at all.
 
+**It only files unfiled bookmarks.** A bookmark that is already in any folder (including an excluded one) is never sent to Jev, never planned or reported, and never a write target, so its folder never changes. There is no refile, move, or misfile mode, and no setting can turn one on: the old `checkMisfiled`, `refileMisfiled`, and `misfiledMinConfidence` settings were removed, and startup fails if any of them reappear in `config/sorter.ts` (or as `CHECK_MISFILED`, `REFILE_MISFILED`, `MISFILED_MIN_CONFIDENCE` in env).
+
 ## Configuration: secrets in env, X OAuth in Vercel Connect, everything else in git
 
 Env holds **only credentials**:
@@ -20,20 +22,17 @@ Every tunable lives in the checked-in [`config/sorter.ts`](config/sorter.ts). Ed
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `dryRun` | `true` | Log planned assignments only. Set `false` to add bookmarks to folders (never deletes). |
+| `dryRun` | `true` | Log planned assignments only. Set `false` to add unfiled bookmarks to folders (never deletes). |
 | `xUserId` | `249951215` | Numeric X user id of @chasemc67; empty means look it up via `/2/users/me` each run |
 | `minConfidence` | `0.7` | Minimum Jev probability **and** confidence to file an unfiled bookmark |
-| `checkMisfiled` | `true` | Re-classify filed bookmarks and report likely misfiles |
-| `refileMisfiled` | `false` | Actually add misfiled bookmarks to the better folder (live only) |
-| `misfiledMinConfidence` | `0.9` | Stricter gate for misfile reports and refiles |
-| `maxBookmarksPerRun` | `200` | Cap on Jev classifications per run |
+| `maxBookmarksPerRun` | `200` | Cap on unfiled bookmarks classified per run |
 | `maxWritesPerRun` | `50` | Cap on add-to-folder writes per run; the rest wait for the next run |
 | `jevBatchSize` | `10` | Bookmarks per Jev request |
 | `maxTextChars` | `400` | Post text is trimmed to this length before it goes into the Jev state |
 | `jevTimeoutMs` | `15000` | Total deadline per Jev batch, including the one retry |
 | `gatewayZeroDataRetention` | `false` | Ask AI Gateway for zero data retention |
 | `folderDescriptions` | `{}` | `{ "Folder name": "what belongs here" }`, which sharpens the Choice criteria |
-| `excludedFolders` | `[]` | Folder names that are never targets and never touched |
+| `excludedFolders` | `[]` | Folder names that are never targets (their bookmarks are filed, so they are already left alone) |
 | `xConnectConnector` | `oauth/x-bookmarks` | Vercel Connect connector uid that holds the X OAuth client |
 | `xConnectSubjectId` | `MRaz5FqERysDw0algrlADHti` | Connect `user` subject whose X grant the cron uses (one subject = one X account). This is the opaque Connect user subject from the dashboard "Test User Authorization" that authorized @ChaseMc67 |
 
@@ -43,21 +42,21 @@ Env vars this app used to read are **rejected**: if one is still set in Vercel, 
 
 ## How a run works
 
-1. List your bookmark folders, each folder's post IDs, and your bookmarks (X returns at most the 800 most recent).
-2. Choose candidates: unfiled bookmarks first, then filed ones when `checkMisfiled` is on, capped at `maxBookmarksPerRun`. Bookmarks in `excludedFolders` are left alone.
-3. Ask Jev in batches of `jevBatchSize`. Each batch sends one shared, trimmed state (author handle, post text, current folder names, and the folder list) plus one `choice` question per bookmark. Criteria keys are the folder names, so they are what the model sees. Every question also offers `keep_unfiled` (no folder clearly fits, so leave it alone) and `skip` (the post can't be judged).
+1. List your bookmark folders, every folder's post IDs (excluded folders included), and your bookmarks (X returns at most the 800 most recent). If any folder listing can't be completed, the run fails before classifying anything, because a partial listing would make filed bookmarks look unfiled.
+2. Choose candidates: **unfiled bookmarks only** (in no folder at all), capped at `maxBookmarksPerRun`. Filed bookmarks are dropped here and never seen again in the run.
+3. Ask Jev in batches of `jevBatchSize`. Each batch sends one shared, trimmed state (author handle, post text, and the folder list) plus one `choice` question per bookmark. Criteria keys are the folder names, so they are what the model sees. Every question also offers `keep_unfiled` (no folder clearly fits, so leave it alone) and `skip` (the post can't be judged).
 4. Plan each bookmark with the pure planner in `src/sorter/plan.ts`:
 
 | Situation | Result |
 | --- | --- |
-| Unfiled, a folder chosen, probability and confidence both at least `minConfidence` | `file` |
+| A folder chosen, probability and confidence both at least `minConfidence` | `file` |
 | A folder chosen below the threshold | `low_confidence` (logged, no write) |
-| Already in the chosen folder | `already_in_folder` (no-op, which makes reruns idempotent) |
 | `keep_unfiled` or `skip` chosen | nothing happens |
-| Filed, a different folder chosen at or above `misfiledMinConfidence` | `misfiled_report`, or `refile` if `refileMisfiled` is on |
 | Jev error, malformed answer, or missing answer | `no_decision` (fails closed) |
 
-5. In live mode only, group the `file` and `refile` actions by folder and send at most 25 IDs per request, capped at `maxWritesPerRun`. Before any write, the runner checks that every ID came from this run's bookmark listing and every folder exists.
+5. In live mode only, take the `file` actions (the only kind that is ever written), capped at `maxWritesPerRun`. The runner refuses to write, failing the run, unless every ID came from this run's bookmark listing, was unfiled in it, and targets a non-excluded folder that exists. Right before writing it re-reads folder membership: any bookmark that got filed in the meantime (for example by hand) is skipped (`write: "skipped_now_filed"`). The rest are grouped by folder and sent at most 25 IDs per request.
+
+Reruns are idempotent: once a bookmark is filed it is no longer a candidate.
 
 Every planned action is logged as one JSON line (`event: "planned"` in dry run, `event: "action"` in live mode). The cron response is a JSON summary.
 
@@ -130,11 +129,11 @@ npm run sort -- --dry-run --json > plan.json
 ```
 
 - **Dry run** (`dryRun: true`): reads from X and asks Jev, then logs the planned folder assignments. It makes no write calls to X.
-- **Live** (`dryRun: false`): adds only the `file` actions, plus `refile` actions if `refileMisfiled` is on. It never deletes anything. Low-confidence items are logged and left alone.
+- **Live** (`dryRun: false`): adds only the `file` actions, which are always unfiled bookmarks. It never deletes anything and never touches a filed bookmark. Low-confidence items are logged and left alone.
 
 Recommended rollout: deploy with `dryRun: true`, read a few days of `planned` logs, tune `folderDescriptions` and `minConfidence`, then commit `dryRun: false`.
 
-An X detail to be aware of: X's OpenAPI spec says `folder_id` on `POST /2/users/:id/bookmarks` adds the post to that folder, but it does not say whether this removes the post from its previous folder. That is why re-filing misfiled bookmarks is off by default and reported only.
+An X detail to be aware of: X's OpenAPI spec says `folder_id` on `POST /2/users/:id/bookmarks` adds the post to that folder, but it does not say whether this removes the post from its previous folder. That is one reason the sorter never sends a filed bookmark to that endpoint.
 
 ## Deploy to Vercel
 

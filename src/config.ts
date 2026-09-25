@@ -16,6 +16,7 @@ export type SorterConfig = SorterSettings & { secrets: Secrets };
 const MOVED_TO_CONFIG = 'now set in config/sorter.ts';
 const HELD_BY_CONNECT = 'X OAuth now lives in the Vercel Connect connector';
 const KV_REMOVED = 'KV only held X tokens, which Vercel Connect now manages; disconnect the Upstash/KV integration from this project';
+const UNFILED_ONLY = 'the sorter only files unfiled bookmarks; filed bookmarks are never reclassified or moved';
 
 /**
  * Env vars this app used to read. Setting one now fails the run instead of being silently ignored,
@@ -27,9 +28,9 @@ export const RETIRED_ENV_VARS: Readonly<Record<string, string>> = {
   JEV_TIMEOUT_MS: MOVED_TO_CONFIG,
   GATEWAY_ZERO_DATA_RETENTION: MOVED_TO_CONFIG,
   MIN_CONFIDENCE: MOVED_TO_CONFIG,
-  MISFILED_MIN_CONFIDENCE: MOVED_TO_CONFIG,
-  CHECK_MISFILED: MOVED_TO_CONFIG,
-  REFILE_MISFILED: MOVED_TO_CONFIG,
+  MISFILED_MIN_CONFIDENCE: UNFILED_ONLY,
+  CHECK_MISFILED: UNFILED_ONLY,
+  REFILE_MISFILED: UNFILED_ONLY,
   MAX_BOOKMARKS_PER_RUN: MOVED_TO_CONFIG,
   MAX_WRITES_PER_RUN: MOVED_TO_CONFIG,
   JEV_BATCH_SIZE: MOVED_TO_CONFIG,
@@ -54,6 +55,16 @@ export const RETIRED_ENV_VARS: Readonly<Record<string, string>> = {
   JEV_PROVIDER: 'Jev runs only through Vercel AI Gateway (AI_GATEWAY_API_KEY)',
 };
 
+/**
+ * Settings that were removed from config/sorter.ts. Present at runtime (for example via a cast
+ * or a stale spread) they fail startup rather than being silently ignored.
+ */
+export const RETIRED_SETTINGS: Readonly<Record<string, string>> = {
+  checkMisfiled: UNFILED_ONLY,
+  refileMisfiled: UNFILED_ONLY,
+  misfiledMinConfidence: UNFILED_ONLY,
+};
+
 function text(env: Env, name: string): string | undefined {
   const value = env[name]?.trim();
   return value ? value : undefined;
@@ -74,8 +85,12 @@ function inRange(name: string, value: number, min: number, max: number, integer 
 }
 
 export function validateSettings(settings: SorterSettings): SorterSettings {
+  const retired = Object.keys(RETIRED_SETTINGS).filter(name => Object.hasOwn(settings, name));
+  if (retired.length > 0) {
+    const details = retired.map(name => `${name} (${RETIRED_SETTINGS[name]})`).join('; ');
+    throw new Error(`config/sorter.ts: remove retired settings: ${details}`);
+  }
   inRange('minConfidence', settings.minConfidence, 0, 1);
-  inRange('misfiledMinConfidence', settings.misfiledMinConfidence, 0, 1);
   inRange('maxBookmarksPerRun', settings.maxBookmarksPerRun, 1, 800, true);
   inRange('maxWritesPerRun', settings.maxWritesPerRun, 0, 800, true);
   inRange('jevBatchSize', settings.jevBatchSize, 1, 50, true);

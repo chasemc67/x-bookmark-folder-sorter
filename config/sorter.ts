@@ -2,21 +2,18 @@
  * Checked-in tunables for the sorter. Edit here and deploy; none of these are env vars.
  * Only credentials live in env (see .env.example); X OAuth credentials live in Vercel Connect.
  * Values are validated at startup.
+ *
+ * The sorter only files unfiled bookmarks. Bookmarks already in any folder are never classified,
+ * reported, or written, and no setting can change that.
  */
 export interface SorterSettings {
-  /** true: log planned folder assignments only. false: add bookmarks to folders (never deletes). */
+  /** true: log planned folder assignments only. false: add unfiled bookmarks to folders (never deletes). */
   dryRun: boolean;
   /** Numeric X user id. Leave empty to look it up via GET /2/users/me each run. */
   xUserId: string;
 
   /** Minimum Jev probability AND confidence required to file an unfiled bookmark. */
   minConfidence: number;
-  /** Re-classify bookmarks already in a folder and report likely misfiles. */
-  checkMisfiled: boolean;
-  /** Actually add misfiled bookmarks to the better folder (live mode only). Report-only when false. */
-  refileMisfiled: boolean;
-  /** Stricter gate for misfile reports and refiles. */
-  misfiledMinConfidence: number;
 
   /** Cap on Jev classifications per run (X lists at most the 800 most recent bookmarks). */
   maxBookmarksPerRun: number;
@@ -34,7 +31,7 @@ export interface SorterSettings {
 
   /** Folder name (as shown in X) -> what belongs there. Sharpens the Choice criteria. */
   folderDescriptions: Record<string, string>;
-  /** Folder names that are never targets; bookmarks already in them are never touched. */
+  /** Folder names that are never targets. */
   excludedFolders: string[];
 
   /** Vercel Connect Custom OAuth connector uid. The X client id/secret live in the connector. */
@@ -51,9 +48,6 @@ export const sorterSettings: SorterSettings = {
   xUserId: '249951215',
 
   minConfidence: 0.7,
-  checkMisfiled: true,
-  refileMisfiled: false,
-  misfiledMinConfidence: 0.9,
 
   maxBookmarksPerRun: 200,
   maxWritesPerRun: 50,
