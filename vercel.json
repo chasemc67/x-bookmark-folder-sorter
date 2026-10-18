@@ -6,11 +6,5 @@
     "api/cron/sort-bookmarks.ts": {
       "maxDuration": 300
     }
-  },
-  "crons": [
-    {
-      "path": "/api/cron/sort-bookmarks",
-      "schedule": "0 7 * * *"
-    }
-  ]
+  }
 }
